@@ -1,76 +1,115 @@
 (ns tsukasa.ledger-core
-  "司 — the itonami node ledger, kotoba guest (JUN-197 refactor target).
-  Pure: no effects admitted. The .cljk host wrapper (src/tsukasa/ledger.cljk)
-  remains the record-shaped surface until the map/record ledger projection is
-  admitted; this core owns the DECISIONS: declaration validation and the
-  lifecycle state machine, with the same pinned reason keywords.
+  "司 — the itonami node ledger, kotoba guest. JUN-197: this is the whole
+  component — registration verdicts, lifecycle state machine, failure-domain
+  audit. Pure: `amu check --jvm-free` reports :effects #{}.
 
-  Measured compiler bounds that shaped this port (amu check --jvm-free,
-  2026-10-21, amu main 6c474c81):
-  - params must carry type annotations when used polymorphically
-    (:string / :i64 / :keyword / :vector-i64); unannotated + mixed use = refused
-  - `cond->` is refused (unbound threading symbol); nested `if` instead
-  - `not=` is not admitted; `=` + inversion
-  - `string-starts-with?` is not admitted; `string-index-of` == 0 is the prefix test
-  - vector literals are :vector-i64 only (string vectors refused)
-  - `vals`/`count` require canonical typed maps / bounded vectors — the map
-    accumulator ledger is NOT ported here; audit takes :vector-i64 domain codes
-  - `bit-shift-left` is not a builtin; `i64-shift-left` / `i64-shift-right` are
-  - keyword identity and keyword return values ARE admitted (the reason pin survives)"
-  (:export [first-problem transition-verdict state?
+  Parity with the .cljk suite (12 tests / 38 assertions): same reason literal
+  texts — \"tsukasa/missing-id\" carries the same pin the :tsukasa/missing-id
+  keyword carried (the test profile refuses keyword VALUES, measured
+  2026-10-21: value-type-outside-profile) — same precedence (id, did,
+  failure-domain, availability), same lifecycle legality incl. retired-terminal
+  and typo-is-not-a-policy-hit, same audit fixture numbers.
+
+  Measured compiler bounds that shaped this port (amu main 6c474c81):
+  - params need type annotations when a symbol is used at more than one type
+  - keyword VALUES are refused by the amu test profile; string literals pin
+    the reason text instead
+  - cond-> / not= / string-starts-with? / bit-shift-* are absent; nested if,
+    inverted if, string-index-of == 0, i64 vector ops substitute
+  - vector literals are :vector-i64; the ledger is 8 slots of state codes
+    with -1 = absent (vector-at OOB traps, so every access is bounds-guarded)
+  - state codes: 0 proposed 1 admitted 2 active 3 draining 4 retired"
+  (:export [first-problem register-verdict commit-register empty-ledger
+            transition-verdict transition-commit state-name
             audit-nodes audit-domains audit-largest audit-single?
-            test-registration test-transitions test-audit test-reasons-pinned]))
+            test-registration test-duplicates test-transitions
+            test-retired-terminal test-ledger test-audit]))
 
 ;; ---------------------------------------------------------------------------
-;; Registration validation. Reasons are pinned literals shared with the .cljk
-;; host: changing one is a breaking change. Order = field order (id, did,
-;; failure-domain, availability); first-problem is the same precedence the
-;; host wrapper reports.
+;; Reason literals. Pinned contract — callers match on these exact strings;
+;; changing one is a breaking change.
 
 (defn blank? [s :string] :bool (= s ""))
 
 (defn prefix? [s :string p :string] :bool (= (string-index-of s p) 0))
 
-(defn first-problem [id :string did :string fd :string av :string]
-  (let [a (if (blank? id) :tsukasa/missing-id :tsukasa/ok)
-        b (if (blank? did) :tsukasa/missing-did
-            (if (prefix? did "did:key:") :tsukasa/ok :tsukasa/bad-did))
-        c (if (blank? fd) :tsukasa/missing-failure-domain :tsukasa/ok)
-        d (if (blank? av) :tsukasa/missing-availability
+(defn first-problem [id :string did :string fd :string av :string] :string
+  (let [a (if (blank? id) "tsukasa/missing-id" "tsukasa/ok")
+        b (if (blank? did) "tsukasa/missing-did"
+            (if (prefix? did "did:key:") "tsukasa/ok" "tsukasa/bad-did"))
+        c (if (blank? fd) "tsukasa/missing-failure-domain" "tsukasa/ok")
+        d (if (blank? av) "tsukasa/missing-availability"
             (if (or (= av "always-on") (= av "intermittent"))
-              :tsukasa/ok :tsukasa/bad-availability))]
-    (if (= a :tsukasa/ok)
-      (if (= b :tsukasa/ok) (if (= c :tsukasa/ok) d c) b)
+              "tsukasa/ok" "tsukasa/bad-availability"))]
+    (if (= a "tsukasa/ok")
+      (if (= b "tsukasa/ok") (if (= c "tsukasa/ok") d c) b)
       a)))
 
 ;; ---------------------------------------------------------------------------
-;; Lifecycle. :retired is terminal — legal? has no branch out of it. A
-;; misspelled state answers :tsukasa/unknown-state, never :illegal-transition:
-;; a typo is not a policy hit.
+;; Ledger: 8 slots of lifecycle state codes, -1 = absent. Refusal returns a
+;; verdict string and NO new ledger — the host gates commit-register on
+;; \"tsukasa/ok\", so a refused registration cannot leak in.
 
-(defn state? [k :keyword] :bool
-  (or (= k :proposed)
-      (or (= k :admitted)
-          (or (= k :active)
-              (or (= k :draining) (= k :retired))))))
+(defn empty-ledger [] :vector-i64 [-1 -1 -1 -1 -1 -1 -1 -1])
 
-(defn legal? [from :keyword to :keyword] :bool
-  (if (= from :proposed) (or (= to :admitted) (= to :retired))
-  (if (= from :admitted) (or (= to :active) (= to :retired))
-  (if (= from :active) (= to :draining)
-  (if (= from :draining) (or (= to :active) (= to :retired))
-  false)))))
+(defn in-range? [states :vector-i64 code :i64] :bool
+  (if (< code 0) false (if (< code (count states)) true false)))
 
-(defn transition-verdict [from :keyword to :keyword]
-  (if (not (state? to)) :tsukasa/unknown-state
-    (if (legal? from to) :tsukasa/ok :tsukasa/illegal-transition)))
+(defn register-verdict [states :vector-i64 code :i64
+                        id :string did :string fd :string av :string] :string
+  (if (in-range? states code)
+    (let [p (first-problem id did fd av)]
+      (if (= p "tsukasa/ok")
+        (if (> (vector-at states code) -1) "tsukasa/duplicate-id" "tsukasa/ok")
+        p))
+    "tsukasa/unknown-node"))
+
+(defn commit-register [states :vector-i64 code :i64] :vector-i64
+  (if (in-range? states code)
+    (reduce (fn [acc j] (vector-conj acc (if (= j code) 0 (vector-at states j))))
+            [] [0 1 2 3 4 5 6 7])
+    states))
 
 ;; ---------------------------------------------------------------------------
-;; Audit. Domain codes are caller-assigned i64s (the host wrapper holds the
-;; domain NAME strings); the counts are what matter. 99 is the sentinel the
-;; seed map carries and is subtracted out — the map accumulator needs one
-;; entry to type. single-domain? is the trap flag: three nodes on one
-;; provider+site are ONE independent thing (kura-node's pseudo-node lesson).
+;; Lifecycle. State codes outside 0..4 are refused as unknown-state (the
+;; code-world form of the .cljk typo case); retired (4) is terminal.
+
+(defn state? [to :i64] :bool (if (> to 4) false (if (< to 0) false true)))
+
+(defn legal? [from :i64 to :i64] :bool
+  (if (= from 0) (if (or (= to 1) (= to 4)) true false)
+  (if (= from 1) (if (or (= to 2) (= to 4)) true false)
+  (if (= from 2) (= to 3)
+  (if (= from 3) (if (or (= to 2) (= to 4)) true false)
+  false)))))
+
+(defn state-name [code :i64] :string
+  (if (= code 0) "proposed"
+  (if (= code 1) "admitted"
+  (if (= code 2) "active"
+  (if (= code 3) "draining"
+  (if (= code 4) "retired" "unknown"))))))
+
+(defn transition-verdict [states :vector-i64 code :i64 to :i64] :string
+  (if (in-range? states code)
+    (let [from (vector-at states code)]
+      (if (> from -1)
+        (if (state? to)
+          (if (legal? from to) "tsukasa/ok" "tsukasa/illegal-transition")
+          "tsukasa/unknown-state")
+        "tsukasa/unknown-node"))
+    "tsukasa/unknown-node"))
+
+(defn transition-commit [states :vector-i64 code :i64 to :i64] :vector-i64
+  (if (in-range? states code)
+    (reduce (fn [acc j] (vector-conj acc (if (= j code) to (vector-at states j))))
+            [] [0 1 2 3 4 5 6 7])
+    states))
+
+;; ---------------------------------------------------------------------------
+;; Audit. Domain codes are caller-assigned i64 in 0..7 (the host holds domain
+;; name strings). Counts NODES vs INDEPENDENT DOMAINS — three nodes on one
+;; provider+site are one independent thing (kura-node's pseudo-node lesson).
 
 (defn occ [ds :vector-i64 e :i64] :i64
   (reduce (fn [acc x] (if (= x e) (+ acc 1) acc)) 0 ds))
@@ -87,39 +126,69 @@
 
 ;; ---------------------------------------------------------------------------
 ;; test-* : exported zero-arity, return true. amu test runs each on
-;; :jvm-kir :js :wasm — the parity surface for the .cljk suite.
+;; :jvm-kir :js :wasm.
 
 (defn test-registration []
-  (if (and (= (first-problem "" "did:key:x" "d" "always-on") :tsukasa/missing-id)
-           (= (first-problem "n" "" "d" "always-on") :tsukasa/missing-did)
-           (= (first-problem "n" "did:web:x" "d" "always-on") :tsukasa/bad-did)
-           (= (first-problem "n" "did:key:x" "" "always-on") :tsukasa/missing-failure-domain)
-           (= (first-problem "n" "did:key:x" "d" "") :tsukasa/missing-availability)
-           (= (first-problem "n" "did:key:x" "d" "mostly-on") :tsukasa/bad-availability)
-           (= (first-problem "n" "did:key:x" "d" "intermittent") :tsukasa/ok)) true false))
+  (if (and (= (first-problem "" "did:key:x" "d" "always-on") "tsukasa/missing-id")
+           (= (first-problem "n" "" "d" "always-on") "tsukasa/missing-did")
+           (= (first-problem "n" "did:web:x" "d" "always-on") "tsukasa/bad-did")
+           (= (first-problem "n" "did:key:x" "" "always-on") "tsukasa/missing-failure-domain")
+           (= (first-problem "n" "did:key:x" "d" "") "tsukasa/missing-availability")
+           (= (first-problem "n" "did:key:x" "d" "mostly-on") "tsukasa/bad-availability")
+           (= (first-problem "n" "did:key:x" "d" "intermittent") "tsukasa/ok")
+           (= (first-problem "n" "did:key:x" "d" "always-on") "tsukasa/ok")) true false))
 
-(defn test-reasons-pinned []
-  (if (and (= :tsukasa/missing-id :tsukasa/missing-id)
-           (= (first-problem "n" "did:key:x" "d" "always-on") :tsukasa/ok)) true false))
+(defn test-duplicates []
+  (let [s (commit-register (empty-ledger) 0)]
+    (if (and (= (register-verdict (empty-ledger) 0 "a" "did:key:x" "d" "always-on") "tsukasa/ok")
+             (= (register-verdict s 0 "a" "did:key:x" "d" "always-on") "tsukasa/duplicate-id")
+             (= (register-verdict s 7 "a" "did:key:x" "d" "always-on") "tsukasa/ok")
+             (= (register-verdict s 8 "a" "did:key:x" "d" "always-on") "tsukasa/unknown-node")
+             (= (register-verdict (empty-ledger) 0 "" "did:key:x" "d" "always-on") "tsukasa/missing-id")) true false)))
 
 (defn test-transitions []
-  (if (and (= (transition-verdict :proposed :admitted) :tsukasa/ok)
-           (= (transition-verdict :proposed :active) :tsukasa/illegal-transition)
-           (= (transition-verdict :proposed :actvie) :tsukasa/unknown-state)
-           (= (transition-verdict :admitted :active) :tsukasa/ok)
-           (= (transition-verdict :admitted :retired) :tsukasa/ok)
-           (= (transition-verdict :active :draining) :tsukasa/ok)
-           (= (transition-verdict :draining :active) :tsukasa/ok)
-           (= (transition-verdict :draining :retired) :tsukasa/ok)
-           (= (transition-verdict :retired :retired) :tsukasa/illegal-transition)
-           (= (transition-verdict :retired :proposed) :tsukasa/illegal-transition)
-           (= (transition-verdict :retired :active) :tsukasa/illegal-transition)) true false))
+  (let [s (commit-register (empty-ledger) 0)]
+    (if (and (= (transition-verdict s 0 1) "tsukasa/ok")
+             (= (transition-verdict s 0 2) "tsukasa/illegal-transition")
+             (= (transition-verdict s 0 9) "tsukasa/unknown-state")
+             (= (transition-verdict s 5 1) "tsukasa/unknown-node")
+             (= (transition-verdict (empty-ledger) 0 1) "tsukasa/unknown-node")
+             (= (transition-verdict s 0 4) "tsukasa/ok")) true false)))
+
+(defn test-retired-terminal []
+  (let [s (transition-commit (commit-register (empty-ledger) 0) 0 4)]
+    (if (and (= (transition-verdict s 0 4) "tsukasa/illegal-transition")
+             (= (transition-verdict s 0 0) "tsukasa/illegal-transition")
+             (= (transition-verdict s 0 1) "tsukasa/illegal-transition")
+             (= (transition-verdict s 0 2) "tsukasa/illegal-transition")
+             (= (transition-verdict s 0 3) "tsukasa/illegal-transition")) true false)))
+
+(defn test-ledger []
+  (let [s0 (empty-ledger)
+        s1 (commit-register s0 0)
+        s2 (transition-commit s1 0 1)
+        s3 (transition-commit s2 0 2)
+        s4 (transition-commit s3 0 3)
+        s5 (transition-commit s4 0 2)
+        s6 (transition-commit s5 0 3)
+        s7 (transition-commit s6 0 4)]
+    (if (and (= (count s0) 8)
+             (= (vector-at s0 0) -1)
+             (= (vector-at s1 0) 0)
+             (= (vector-at s2 0) 1)
+             (= (vector-at s7 0) 4)
+             (= (state-name (vector-at s7 0)) "retired")
+             (= (state-name 9) "unknown")) true false)))
 
 (defn test-audit []
   (if (and (= (audit-nodes [1 1 2]) 3)
            (= (audit-domains [1 1 2]) 2)
            (= (audit-largest [1 1 2]) 2)
-           (= (audit-single? [1 1 2]) false)
+           (not (audit-single? [1 1 2]))
            (= (audit-nodes [4 4 4]) 3)
            (= (audit-domains [4 4 4]) 1)
-           (= (audit-single? [4 4 4]) true)) true false))
+           (= (audit-largest [4 4 4]) 3)
+           (audit-single? [4 4 4])
+           (= (audit-nodes []) 0)
+           (= (audit-domains []) 0)
+           (not (audit-single? []))) true false))
