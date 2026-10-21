@@ -1,0 +1,15 @@
+(ns tsukasa.test-runner
+  "Minimal runner: the explicit namespace list is what makes a missing
+  namespace a visible failure instead of a silent pass."
+  (:require [clojure.test :as t]
+            [tsukasa.ledger-test]))
+
+(def test-namespaces
+  '[tsukasa.ledger-test])
+
+(defn -main [& _]
+  (let [{:keys [fail error] :as summary} (apply t/run-tests test-namespaces)
+        bad (+ fail error)]
+    (println summary)
+    (when (pos? bad)
+      (throw (ex-info (str bad " test failure(s)") summary)))))
