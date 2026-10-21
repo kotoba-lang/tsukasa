@@ -1,0 +1,125 @@
+(ns tsukasa.ledger-core
+  "司 — the itonami node ledger, kotoba guest (JUN-197 refactor target).
+  Pure: no effects admitted. The .cljk host wrapper (src/tsukasa/ledger.cljk)
+  remains the record-shaped surface until the map/record ledger projection is
+  admitted; this core owns the DECISIONS: declaration validation and the
+  lifecycle state machine, with the same pinned reason keywords.
+
+  Measured compiler bounds that shaped this port (amu check --jvm-free,
+  2026-10-21, amu main 6c474c81):
+  - params must carry type annotations when used polymorphically
+    (:string / :i64 / :keyword / :vector-i64); unannotated + mixed use = refused
+  - `cond->` is refused (unbound threading symbol); nested `if` instead
+  - `not=` is not admitted; `=` + inversion
+  - `string-starts-with?` is not admitted; `string-index-of` == 0 is the prefix test
+  - vector literals are :vector-i64 only (string vectors refused)
+  - `vals`/`count` require canonical typed maps / bounded vectors — the map
+    accumulator ledger is NOT ported here; audit takes :vector-i64 domain codes
+  - `bit-shift-left` is not a builtin; `i64-shift-left` / `i64-shift-right` are
+  - keyword identity and keyword return values ARE admitted (the reason pin survives)"
+  (:export [first-problem transition-verdict state?
+            audit-nodes audit-domains audit-largest audit-single?
+            test-registration test-transitions test-audit test-reasons-pinned]))
+
+;; ---------------------------------------------------------------------------
+;; Registration validation. Reasons are pinned literals shared with the .cljk
+;; host: changing one is a breaking change. Order = field order (id, did,
+;; failure-domain, availability); first-problem is the same precedence the
+;; host wrapper reports.
+
+(defn blank? [s :string] :bool (= s ""))
+
+(defn prefix? [s :string p :string] :bool (= (string-index-of s p) 0))
+
+(defn first-problem [id :string did :string fd :string av :string]
+  (let [a (if (blank? id) :tsukasa/missing-id :tsukasa/ok)
+        b (if (blank? did) :tsukasa/missing-did
+            (if (prefix? did "did:key:") :tsukasa/ok :tsukasa/bad-did))
+        c (if (blank? fd) :tsukasa/missing-failure-domain :tsukasa/ok)
+        d (if (blank? av) :tsukasa/missing-availability
+            (if (or (= av "always-on") (= av "intermittent"))
+              :tsukasa/ok :tsukasa/bad-availability))]
+    (if (= a :tsukasa/ok)
+      (if (= b :tsukasa/ok) (if (= c :tsukasa/ok) d c) b)
+      a)))
+
+;; ---------------------------------------------------------------------------
+;; Lifecycle. :retired is terminal — legal? has no branch out of it. A
+;; misspelled state answers :tsukasa/unknown-state, never :illegal-transition:
+;; a typo is not a policy hit.
+
+(defn state? [k :keyword] :bool
+  (or (= k :proposed)
+      (or (= k :admitted)
+          (or (= k :active)
+              (or (= k :draining) (= k :retired))))))
+
+(defn legal? [from :keyword to :keyword] :bool
+  (if (= from :proposed) (or (= to :admitted) (= to :retired))
+  (if (= from :admitted) (or (= to :active) (= to :retired))
+  (if (= from :active) (= to :draining)
+  (if (= from :draining) (or (= to :active) (= to :retired))
+  false)))))
+
+(defn transition-verdict [from :keyword to :keyword]
+  (if (not (state? to)) :tsukasa/unknown-state
+    (if (legal? from to) :tsukasa/ok :tsukasa/illegal-transition)))
+
+;; ---------------------------------------------------------------------------
+;; Audit. Domain codes are caller-assigned i64s (the host wrapper holds the
+;; domain NAME strings); the counts are what matter. 99 is the sentinel the
+;; seed map carries and is subtracted out — the map accumulator needs one
+;; entry to type. single-domain? is the trap flag: three nodes on one
+;; provider+site are ONE independent thing (kura-node's pseudo-node lesson).
+
+(defn occ [ds :vector-i64 e :i64] :i64
+  (reduce (fn [acc x] (if (= x e) (+ acc 1) acc)) 0 ds))
+
+(defn audit-nodes [ds :vector-i64] :i64 (count ds))
+
+(defn audit-domains [ds :vector-i64] :i64
+  (reduce (fn [acc c] (if (> (occ ds c) 0) (+ acc 1) acc)) 0 [0 1 2 3 4 5 6 7]))
+
+(defn audit-largest [ds :vector-i64] :i64
+  (reduce (fn [acc c] (if (> (occ ds c) acc) (occ ds c) acc)) 0 [0 1 2 3 4 5 6 7]))
+
+(defn audit-single? [ds :vector-i64] :bool (= (audit-domains ds) 1))
+
+;; ---------------------------------------------------------------------------
+;; test-* : exported zero-arity, return true. amu test runs each on
+;; :jvm-kir :js :wasm — the parity surface for the .cljk suite.
+
+(defn test-registration []
+  (if (and (= (first-problem "" "did:key:x" "d" "always-on") :tsukasa/missing-id)
+           (= (first-problem "n" "" "d" "always-on") :tsukasa/missing-did)
+           (= (first-problem "n" "did:web:x" "d" "always-on") :tsukasa/bad-did)
+           (= (first-problem "n" "did:key:x" "" "always-on") :tsukasa/missing-failure-domain)
+           (= (first-problem "n" "did:key:x" "d" "") :tsukasa/missing-availability)
+           (= (first-problem "n" "did:key:x" "d" "mostly-on") :tsukasa/bad-availability)
+           (= (first-problem "n" "did:key:x" "d" "intermittent") :tsukasa/ok)) true false))
+
+(defn test-reasons-pinned []
+  (if (and (= :tsukasa/missing-id :tsukasa/missing-id)
+           (= (first-problem "n" "did:key:x" "d" "always-on") :tsukasa/ok)) true false))
+
+(defn test-transitions []
+  (if (and (= (transition-verdict :proposed :admitted) :tsukasa/ok)
+           (= (transition-verdict :proposed :active) :tsukasa/illegal-transition)
+           (= (transition-verdict :proposed :actvie) :tsukasa/unknown-state)
+           (= (transition-verdict :admitted :active) :tsukasa/ok)
+           (= (transition-verdict :admitted :retired) :tsukasa/ok)
+           (= (transition-verdict :active :draining) :tsukasa/ok)
+           (= (transition-verdict :draining :active) :tsukasa/ok)
+           (= (transition-verdict :draining :retired) :tsukasa/ok)
+           (= (transition-verdict :retired :retired) :tsukasa/illegal-transition)
+           (= (transition-verdict :retired :proposed) :tsukasa/illegal-transition)
+           (= (transition-verdict :retired :active) :tsukasa/illegal-transition)) true false))
+
+(defn test-audit []
+  (if (and (= (audit-nodes [1 1 2]) 3)
+           (= (audit-domains [1 1 2]) 2)
+           (= (audit-largest [1 1 2]) 2)
+           (= (audit-single? [1 1 2]) false)
+           (= (audit-nodes [4 4 4]) 3)
+           (= (audit-domains [4 4 4]) 1)
+           (= (audit-single? [4 4 4]) true)) true false))

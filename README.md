@@ -68,6 +68,12 @@ kbb -M:test    # test-runner; throws on any failure
 kbb -M:lint    # clj-kondo --fail-level error
 ```
 
+kbb は移行中の互換ゲート（JUN-197）。正ゲートは `amu check --jvm-free` +
+`amu test` に差し替え中 — `kotoba/tsukasa/ledger_core.kotoba` は check 緑
+（`:ok true :effects #{}`、2026-10-21 実測）だが `amu test` の wasm leg が
+`wasm-self-validation` internal error で赤。実測境界は
+`docs/kotoba-port-boundary.md`。wasm leg が緑になるまで kbb ゲートは残す。
+
 ## Not implemented (measured boundary, not a plan)
 
 - No persistence: the ledger is a value. Where records live (kotobase, EDN
