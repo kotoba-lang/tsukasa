@@ -8,7 +8,8 @@ That is all it does.
 Naming: metaphor name (司), owner-approved 2026-10-21, registered in
 `manifest/concept-vocabulary.edn` (com-junkawasaki/root). Candidates that were
 rejected for sibling slots: `hako`（箱）and `fune`（船）— reserved for a future
-container / microVM exec backing, not used here.
+container / microVM exec backing, not used here. Owner 2026-10-22: "hako =
+fune" — one name, fune, for the Linux-image runtime class (`container`).
 
 **This library decides nothing about where work runs.** Every function takes
 small values and returns small values — codes, verdicts, counts. No sockets,
@@ -40,13 +41,16 @@ enforce for storage nodes, applied to itonami nodes generally.
 
 3. **`runtime-classes` is required and closed** (JUN-287, ADR-0244 §3). A mask of
    the dapp runtime classes the node declares it can accept: `wasm = 1`,
-   `container = 2` (hako name still awaiting owner approval; the class id is `container`), `microvm = 4` (fune, owner-approved 2026-10-22); valid masks are `1..7`.
-   `0` (nothing declared) → `"tsukasa/missing-runtime-classes"`; outside `1..7`
+   `container = 2` (named fune); valid masks are `1..3`. Owner 2026-10-22
+   "hako = fune": a Linux OCI image is one class, and whether the node runs it
+   as a container (Linux, rootless podman) or a microVM (aiueos vmm) is the
+   node's choice, not a separate class. The earlier `microvm = 4` bit is gone.
+   `0` (nothing declared) → `"tsukasa/missing-runtime-classes"`; outside `1..3`
    → `"tsukasa/unknown-runtime-class"`. This is a *declaration*, not a grant:
    whether a class may run on the node is kekkai/grant's decision, and where
    work lands is murakumo/sahai's. `has-runtime-class?` answers membership
-   for a mask and a class name (`"wasm"`, `"container"`, `"microvm"`); any
-   other name is never held.
+   for a mask and a class name (`"wasm"`, `"container"`); any other name,
+   `"microvm"` included, is never held.
 
    **Breaking change:** `first-problem` and `register-verdict` take the mask
    as a final `:i64` argument. Precedence is id, did, failure-domain,
