@@ -27,7 +27,7 @@ no processes, no scheduling, no keys.
 
 ## What it refuses
 
-The two declarations below have **no default**. A default is a lie about
+The three declarations below have **no default**. A default is a lie about
 somebody's reliability — the same rule `kura-node` and `kura-coordinator`
 enforce for storage nodes, applied to itonami nodes generally.
 
@@ -37,6 +37,20 @@ enforce for storage nodes, applied to itonami nodes generally.
    are is the *caller's* policy, tsukasa only refuses the undeclared.
 2. **`availability` is required and closed.** Exactly `"always-on"` or
    `"intermittent"`. Omitted → refused, not defaulted. Unknown value → refused.
+
+3. **`runtime-classes` is required and closed** (JUN-287, ADR-0244 §3). A mask of
+   the dapp runtime classes the node declares it can accept: `wasm = 1`,
+   `container = 2` (hako name still awaiting owner approval; the class id is `container`), `microvm = 4` (fune, owner-approved 2026-10-22); valid masks are `1..7`.
+   `0` (nothing declared) → `"tsukasa/missing-runtime-classes"`; outside `1..7`
+   → `"tsukasa/unknown-runtime-class"`. This is a *declaration*, not a grant:
+   whether a class may run on the node is kekkai/grant's decision, and where
+   work lands is murakumo/sahai's. `has-runtime-class?` answers membership
+   for a mask and a class name (`"wasm"`, `"container"`, `"microvm"`); any
+   other name is never held.
+
+   **Breaking change:** `first-problem` and `register-verdict` take the mask
+   as a final `:i64` argument. Precedence is id, did, failure-domain,
+   availability, runtime-classes.
 
 Refusals carry a **pinned reason literal** — `"tsukasa/missing-failure-domain"`
 and friends, the full set in `first-problem`'s branches. Tests assert the
@@ -69,16 +83,46 @@ The former `.cljk` host wrapper and its kbb test suite were retired
 
 ## Gates
 
+**Selfhost gate (no Node.js, nbb, JVM or babashka).** The Amu selfhost
+compiler — the pinned `seed/bootstrap/aarch64-linux-static-root.elf` of amu,
+sha256 `8256bfd8…dc7` — compiles the component plus a seven-test driver into
+an `aarch64-linux` static image and runs it on arm64 Linux:
+
 ```bash
-amu check kotoba/tsukasa/ledger_core.kotoba --jvm-free
-#   → {:ok true, :effects #{}}
-amu test  kotoba/tsukasa/ledger_core.kotoba --jvm-free
-#   → 18/18 passed (6 test-* × :jvm-kir :js :wasm)
+AMU=../amu; G=$(mktemp -d)   # G must be under a path podman can mount
+cp "$AMU/seed/bootstrap/aarch64-linux-static-root.elf" "$G/root.elf"
+F=kotoba/tsukasa/ledger_core.kotoba
+end=$(grep -n 'test-runtime-classes\]))' $F | cut -d: -f1)
+{ echo '(ns tsukasa-gate (:export [main]))'
+  tail -n +$((end+1)) $F
+  cat <<'EOF'
+(defn main [] :i64
+  (+ (if (test-registration) 1 0) (+ (if (test-duplicates) 2 0)
+  (+ (if (test-transitions) 4 0) (+ (if (test-retired-terminal) 8 0)
+  (+ (if (test-ledger) 16 0) (+ (if (test-audit) 32 0)
+  (if (test-runtime-classes) 64 0))))))))
+EOF
+} > "$G/gate.kotoba"
+podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35="$G" \
+  -v "$G:$G" -w "$G" docker.io/library/python:3.12-alpine sh -c \
+  "./root.elf compile $G/gate.kotoba --target aarch64-linux --output $G/gate.elf --format static \
+   && chmod +x gate.elf && KEXE_STRUCTURED_REPORT=1 ./gate.elf"
+#   → {:ok true, :target :aarch64-linux, :format :static, ...}
+#   → {:status :ok :result 127 ...}     (127 = all seven test-* true)
 ```
 
-Measured green 2026-10-21 on amu main `6c474c81`. The port constraints that
-shaped this file (no keyword values in the test profile, `:vector-i64`-only
-vectors, `(= bool false)` breaking wasm self-validation, …) are recorded in
+The driver only replaces the `ns` form (the seed takes no docstring and
+exports only `:i64` functions) and adds `main`. The container image is
+used only for its `sh`; nothing in it runs the compiler or the tests.
+
+Measured 2026-10-22 on amu main `f5b11a08`: `:result 127`, and a mutated
+`test-runtime-classes` gives `:result 63` (receipt:
+`docs/evidence/selfhost-gate-20261022.edn`).
+
+The earlier gate was `amu check` / `amu test` through the Node-hosted
+`bin/amu` (21/21 = 7 test-* × :jvm-kir :js :wasm, 2026-10-22). It is not
+the required path any more and was not re-run for the selfhost rewrite.
+The port constraints that shaped this file are recorded in
 `docs/kotoba-port-boundary.md`.
 
 ## Not implemented (measured boundary, not a plan)

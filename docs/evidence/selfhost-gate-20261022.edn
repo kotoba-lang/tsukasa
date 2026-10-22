@@ -1,0 +1,27 @@
+;; tsukasa selfhost gate receipt (JUN-287). The README "Gates" commands, run
+;; 2026-10-22 on this Mac's podman machine (applehv, arm64 Linux guest).
+;; No Node.js, nbb, JVM or babashka in the build or the run: the Amu
+;; selfhost root compiler compiles, the static image runs, and the container
+;; image supplies only `sh`.
+{:schema "tsukasa.selfhost-gate.v1"
+ :date "2026-10-22"
+ :compiler {:repo "kotoba-lang/amu"
+            :commit "f5b11a08"
+            :path "seed/bootstrap/aarch64-linux-static-root.elf"
+            :sha256 "8256bfd8462c2014bf1864f154e88aa7cbb16eda7754aaabf8bf2303dcfc8dc7"}
+ :source {:path "kotoba/tsukasa/ledger_core.kotoba"
+          :sha256 "95c1224a7c6675f152a3fef24f3acc6754f43ab5d79589ec22814c62e6acfaf0"}
+ :driver {:sha256 "80569c53639673902994a1ed978acb2f0b9822f39415d0a46bc46f1a06512b60"
+          :main "1 + 2 + 4 + 8 + 16 + 32 + 64 over the seven test-*"}
+ :host {:runtime "podman --platform linux/arm64 --network none"
+        :image "docker.io/library/python:3.12-alpine"
+        :image-digest "sha256:57f679a3910bed1eb16ad722b904a118bca8586ec8ad39d98dd13350e7062cb2"
+        :uname-m "aarch64"}
+ :compile {:report "{:ok true, :target :aarch64-linux, :format :static, :code-bytes 121204, :bytes 127488}"
+           :image-sha256 "cc464a8e504907cca8e63d948de7d21addcd79c3b8e5f93004b30edd90d589c8"
+           :reproduced-byte-identical true}
+ :run {:report "{:status :ok :result 127 ...}" :result 127 :expected 127}
+ :negative-control {:mutation "(runtime-classes-problem 8) expected \"tsukasa/ok\" instead of \"tsukasa/unknown-runtime-class\""
+                    :image-sha256 "08381235e49a7ca2b6806244415d5870b40c217cbcb0963750c2198b86ff402b"
+                    :result 63 :expected 63}
+ :not-run ["amu check / amu test through the Node-hosted bin/amu (owner 2026-10-22: no Node.js in the path)"]}
