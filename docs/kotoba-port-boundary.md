@@ -62,6 +62,24 @@ that does not validate.
 - `(:export [...])` must name declared public fns exactly; `amu test` runs
   exported zero-arity `test-*` returning true on :jvm-kir :js :wasm.
 
+## Amu selfhost seed constraints (2026-10-22)
+
+Measured with the pinned selfhost root compiler (amu `f5b11a08`,
+`seed/HEADS`), which is stricter than the Node-hosted `bin/amu`:
+
+- a `fn` literal may capture only `:i64` locals (E2104 otherwise). The
+  `(reduce (fn ..) [] [0 .. 7])` slot rebuilds captured the ledger vector, so
+  they are self-recursive defns (`set-slot`, `domains-from`, `largest-from`).
+- `fn` parameters are bare symbols; an annotation is E2139. Their types come
+  from the context (the accumulator and item types of `reduce`).
+- `loop` bindings are i64 / bool / string only, so a vector accumulator
+  recurs through a defn, not a `loop`.
+- the `ns` form is `(ns NAME (:export [..]))` with no docstring, and an
+  exported fn takes only `:i64` and returns `:i64` / `:bool`. The component
+  keeps its API; the selfhost gate builds a driver that exports `main` only.
+- defns need a declared result type, so the zero-arity `test-*` declare
+  `:bool`.
+
 ## Parity with the retired .cljk suite (12 tests / 38 assertions)
 
 Same reason literal texts and precedence (id → did → failure-domain →
