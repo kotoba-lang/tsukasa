@@ -80,10 +80,76 @@ refused transition returns no new ledger.
 ```text
 kotoba/tsukasa/ledger_core.kotoba   the whole component: verdicts, state
                                     machine, audit (pure, zero effects)
+kotoba/tsukasa/node_state.kotoba    a node's state derived from L1 and L2,
+                                    one legal step at a time (below)
 ```
 
 The former `.cljk` host wrapper and its kbb test suite were retired
 2026-10-21 (JUN-197): the guest is the component, not a core beside one.
+
+## Node state from L1 and L2
+
+`kotoba/tsukasa/node_state.kotoba` derives a node's ledger state from the
+management plane's two layers (com-junkawasaki/root ADR-2610222140 §1;
+Linear JUN-315). No coordinator writes the ledger: every node gets the same
+state from the same inputs.
+
+- **From L1** (the operator's signed intent):
+  - the digest of the declaration the operator admitted (`""` if none;
+    admission is a human decision)
+  - `cordoned`
+  - `retired`
+- **From L2** (the node's own signed observation):
+  - `first-problem` of its declaration
+  - the declaration's digest
+  - `fresh`: murakumo's `fleet-placement` `fresh?`
+  - `self-drain`
+- `node-target` names where the inputs point: `node/retired`, `node/refused`,
+  `node/proposed`, `node/declaration-changed` (the node must be admitted
+  again), `node/cordoned`, `node/stale`, `node/self-drain` or `node/active`.
+- `next-state` takes one step from the previous state toward the target:
+  - A new node enters as proposed.
+  - It reaches active only through admitted.
+  - An active node that cannot be scheduled drains, and drains before it
+    retires.
+  - Retired is terminal.
+  - A heartbeat that stops sends an active node to draining, and one that
+    comes back returns it to active.
+- `test-legal` checks every (previous state, target) pair against
+  `ledger_core`'s `legal?`, so the derived history never makes an illegal
+  transition.
+
+Gate (no Node.js, nbb, JVM or babashka). It builds on `ledger_core`, so both
+module bodies go into the unit:
+
+```bash
+AMU=../amu; G=$(mktemp -d)   # G must be under a path podman can mount
+cp "$AMU/seed/bootstrap/aarch64-linux-static-root.elf" "$G/root.elf"
+L=kotoba/tsukasa/ledger_core.kotoba; N=kotoba/tsukasa/node_state.kotoba
+{ echo '(ns tsukasa-node-state-gate (:export [main]))'
+  tail -n +$(( $(grep -n 'test-runtime-classes\]))' $L | cut -d: -f1) + 1 )) $L
+  tail -n +$(( $(grep -n 'test-legal test-paths\]))' $N | cut -d: -f1) + 1 )) $N
+  cat <<'EOF'
+(defn main [] :i64
+  (+ (if (test-target) 1 0) (+ (if (test-steps) 2 0)
+  (+ (if (test-legal) 4 0) (if (test-paths) 8 0)))))
+EOF
+} > "$G/node-state.kotoba"
+podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35="$G" \
+  -v "$G:$G" -w "$G" docker.io/library/python:3.12-alpine sh -c \
+  "./root.elf compile $G/node-state.kotoba --target aarch64-linux --output $G/node-state.elf --format static \
+   && chmod +x node-state.elf && KEXE_STRUCTURED_REPORT=1 ./node-state.elf"
+#   → {:status :ok :result 15 ...}     (15 = all four test-* true)
+```
+
+Measured on 2026-10-22 with the root of amu `f5b11a08`: `:result 15`. Two
+negative controls each break one rule, and each gives `1`, because
+`test-steps`, `test-legal` and `test-paths` all drop:
+
+- retiring an active node directly, without draining
+- making a proposed node active without admitting it first
+
+Receipt: `docs/evidence/node-state-selfhost-gate-20261022.edn`.
 
 ## Gates
 
@@ -134,7 +200,8 @@ The port constraints that shaped this file are recorded in
 - No persistence: the ledger is a value. Where records live (kotobase, EDN
   files, git) is the caller's decision.
 - No network: enrollment and heartbeat belong to murakumo; tsukasa never
-  learns node state on its own.
+  learns node state on its own. `node_state` derives the state from what the
+  caller passes in, and it reads nothing itself.
 - No DID verification: `did` is checked for shape (`did:key:` prefix) only.
   Signature verification is aiueos/kotoba-id territory.
 - No placement arithmetic: survivability analysis beyond the failure-domain
